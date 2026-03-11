@@ -1,128 +1,203 @@
-# Lab plan — Building an Observability CLI Agent
+# Lab plan — Build Your Own Agent
 
-**Topic:** Agentic loops with observability using the VictoriaMetrics stack
+**Topic:** Agent loop, LLM tool calling, CLI development, course review
 **Date:** 2026-03-11
 
 ## Main goals
 
-- Demystify the agent loop concept by building a simple useful agent.
-- Convey the idea that you can let an agent debug by providing it with access to observability tools.
+- Demystify the agent loop by building one from scratch.
+- Reinforce understanding of all course material (labs 1-6) through an evaluation benchmark.
+- Teach LLM API integration and tool calling as a transferable skill.
+
+## Design principles
+
+| Principle | Implication |
+|-----------|-------------|
+| Learn by debugging, not by one-shotting | Students iterate against a hidden benchmark. They see what fails, diagnose why, fix, re-run. |
+| Specify interfaces, not implementations | We define CLI input/output format, tool schemas, eval criteria. How they build the agent is their choice. |
+| Evaluate the agent, evaluate the student | The question bank tests both agent correctness AND student understanding of course material. |
+| Build on what exists | The agent operates on their deployed lab 5 system (backend, DB, frontend). No new infrastructure. |
+| Progressive difficulty | Basic questions need just an LLM. Tool questions need real implementations. Edge cases need iteration. |
 
 ## Learning outcomes
 
 By the end of this lab, students should be able to:
 
-- [Remember] Identify the three pillars of observability — metrics, logs, and traces — and the role each plays in understanding a running system.
-- [Understand] Explain how an agentic loop works: the LLM receives context, decides whether to call a tool, receives the tool result, and repeats until it produces a final answer.
-- [Apply] Query the VictoriaMetrics and VictoriaLogs HTTP APIs from a Python CLI to retrieve metrics and log entries.
-- [Apply] Implement a minimal agentic loop in Python that gives an LLM access to observability tools and iterates until the LLM stops calling tools.
-- [Analyze] Interpret telemetry signals — high error rates, slow response times, spike in log errors — to diagnose a simulated system anomaly.
-- [Evaluate] Assess how the set of tools exposed to an agent affects the completeness of its diagnosis by comparing outputs with different tool configurations.
-
-In simple words:
-
-> 1. I can name the three pillars of observability and say what each one is for.
-> 2. I can explain what happens in an agentic loop step by step.
-> 3. I can write Python code that queries VictoriaMetrics and VictoriaLogs and displays the results in the terminal.
-> 4. I can build a loop that lets an LLM call my observability tools and stop when it has an answer.
-> 5. I can read metrics and logs from the stack and explain what they reveal about the system's health.
-> 6. I can compare what the agent produces with different tools enabled and explain why wider tool access leads to a better diagnosis.
+- [Understand] Explain how an agentic loop works: user input → LLM → tool call → execute → feed result → repeat until final answer.
+- [Apply] Integrate with an LLM API using the OpenAI-compatible chat completions format with tool/function calling.
+- [Apply] Implement tools that read files, list directories, and query HTTP APIs, then register them as function-calling schemas.
+- [Apply] Build a CLI that accepts structured input and produces structured output (JSON).
+- [Analyze] Debug agent behavior by examining tool call traces, identifying prompt issues, and fixing tool implementations.
+- [Evaluate] Assess agent quality against a benchmark, iterating on prompts and tools to improve pass rate.
 
 ## Lab story
 
-You joined the SRE team at a company that runs a set of microservices. The team already deploys a VictoriaMetrics stack via Docker Compose — it collects metrics and logs from every service — but no one has built a tool that pulls it all together. The team lead wants a small command-line agent that can autonomously investigate a system anomaly by querying the observability stack and report its findings in plain language. The agent will use the Qwen3-Coder model through the free Qwen API, which provides 1000 requests per day — enough for development and testing.
+You have a running Learning Management Service from the previous lab — a backend, a database full of analytics data, and a frontend dashboard. The course is coming to a close and you need to review everything you've learned. Instead of manually reviewing, you'll build a CLI agent that can answer questions about the course and about your own system. The agent uses an LLM with tools to read your codebase and query your API.
 
-A senior engineer explains the assignment:
+An evaluation benchmark tests your agent with ~30 questions. You can't see the questions upfront — you discover them by running the checker. Each failed question tells you what went wrong, and you fix it. By the time your agent passes, you've reviewed the course material and understood how agents work.
 
-> 1. Explore the observability stack running in Docker Compose — understand what metrics and logs are available and how to query them through the HTTP APIs.
-> 2. Build a Python CLI using `rich` that can fetch and display metrics and log entries from VictoriaMetrics and VictoriaLogs.
-> 3. Extend the CLI with an agentic loop: give an LLM access to your observability tools and let it autonomously investigate a simulated anomaly and produce a diagnosis report.
+## Architecture
+
+```
+Student's VM:
+  agent.py (CLI) ←→ OpenRouter API (free LLM)
+       │
+       ├── read_file(path)   → local filesystem
+       ├── list_files(dir)   → local filesystem
+       └── query_api(path)   → localhost:42002 (their deployed backend)
+
+Autochecker:
+  SSH → python agent.py '{"question":"..."}' → stdout JSON
+  Compare answer against expected → PASS/FAIL
+```
+
+## LLM access
+
+**Provider:** OpenRouter (free tier, zero cost)
+- Students create an account at openrouter.ai, get an API key (no credit card)
+- API is OpenAI-compatible: `POST https://openrouter.ai/api/v1/chat/completions`
+- Default model: `meta-llama/llama-3.3-70b-instruct:free` (128k ctx, tool calling)
+- 18+ free models support tool calling; students may switch
+
+**Alternatives considered and rejected:**
+- Shared API key: risk of leaks, hard to rate-limit per student
+- Student-provided keys: unequal access, cost barrier
+- Local models (Ollama): VM resources too limited, tool calling unreliable
+
+## Tool interface
+
+**Decision:** OpenAI-style function calling (industry standard).
+
+Students define tools as JSON schemas in the `tools` parameter of the API request. The LLM returns structured `tool_calls`. Students execute the tool, send the result back as a `tool` role message, and loop until the LLM gives a final text answer.
+
+**Alternatives considered and rejected:**
+- Provided SDK/wrapper: hides how agents actually work, defeats the pedagogical goal
+- Free-form text parsing (regex): fragile, non-standard, wastes time on parsing bugs
+
+## CLI interface (all tasks)
+
+**Input:** JSON argument with question field
+```bash
+python agent.py '{"question": "What does REST stand for?"}'
+```
+
+**Output:** Single JSON line to stdout
+```json
+{"answer": "Representational State Transfer.", "tool_calls": []}
+```
+
+With tools:
+```json
+{
+  "answer": "The backend uses FastAPI.",
+  "tool_calls": [
+    {"tool": "read_file", "args": {"path": "backend/app/main.py"}, "result": "from fastapi import FastAPI..."}
+  ]
+}
+```
+
+**Rules:**
+- Output must be valid JSON, single line, to stdout
+- `answer` and `tool_calls` fields are required
+- Debug/progress output goes to stderr only
+- 60-second timeout per question
+- Exit code 0 on success
+
+## Required tools
+
+### `read_file`
+Read a file from the project repo. Must restrict to project directory.
+- Parameters: `path` (string) — relative path from project root
+- Returns: file contents or error message
+
+### `list_files`
+List files/directories at a path.
+- Parameters: `path` (string) — relative directory path
+- Returns: newline-separated listing
+
+### `query_api`
+Call the deployed backend API.
+- Parameters: `method` (string), `path` (string), `body` (string, optional)
+- Returns: JSON with status_code and body
+- Must handle authentication (API key from env/config)
+
+## Evaluation design
+
+### How it works
+Autochecker SSHes into VM, runs `python agent.py '{"question":"..."}'` for each eval question, parses JSON output, compares answer against expected.
+
+### What students see
+- ✅ green: passed — shows question and their answer (so they learn)
+- ❌ red: failed — shows question, their answer, and expected match criteria
+- Students target one failed question at a time
+
+### Answer matching strategies
+- `contains`: answer contains keyword(s)
+- `regex`: answer matches pattern
+- `numeric_gt` / `numeric_range`: numeric comparison
+- `any_of`: answer contains any listed value
+- `contains_all`: answer contains all listed values
+
+### Tool usage verification
+For `requires_tool` questions, `tool_calls` must be non-empty and include the expected tool.
+
+### Question categories
+- A: Course concepts (no tools) — Git, REST, Docker, SQL, testing, ETL, agents
+- B: HTTP & REST (no tools) — status codes, methods, auth vs authz
+- C: System architecture (read_file) — framework, DB, ORM, ports
+- D: Code inspection (read_file, list_files) — auth mechanism, routers, test framework
+- E: Live system queries (query_api) — item count, status codes, endpoint behavior
+- F: Data analysis (query_api + reasoning) — scores, pass rates, groups
+
+### Difficulty tiers
+- Tier 1 (after task 1): ~15 basic questions, need ≥8 to pass
+- Tier 2 (after task 2): ~12 tool questions, need ≥7 to pass
+- Tier 3 (after task 3): all ~34 questions, need ≥26 (75%) to pass
 
 ## Required tasks
 
-### Task 1 — Explore the Observability Stack
+### Setup — Deploy Your System
 
-**Purpose:**
+Students deploy their completed lab 5 system on their VM. The autochecker verifies SSH access, API reachability, and that the database has data.
 
-Build a mental model of the VictoriaMetrics stack and learn what observability data is available before writing any code.
+### Task 1 — Basic Agent Loop
 
-**Summary:**
+Build `agent.py` CLI with: JSON input parsing → LLM API call (OpenRouter) → system prompt with course knowledge → JSON output. No tools yet. Tier 1 eval runs.
 
-Students start the provided Docker Compose environment, which runs VictoriaMetrics (metrics), VictoriaLogs (logs), and a simulated service that emits realistic metrics and log entries. They open the VictoriaMetrics UI and run several MetricsQL queries by hand to see what series exist. They also query the VictoriaLogs HTTP API to retrieve recent log entries.
+**Commit:** `feat: implement basic agent loop with LLM integration`
 
-Students fill in a structured questionnaire file with answers extracted directly from the UI and API responses — metric names, label cardinality, log stream selectors, and the difference between a counter and a gauge. The questionnaire is committed to the repository and verified by the autochecker.
+### Task 2 — Add Tools
 
-**Acceptance criteria:**
+Implement `read_file`, `list_files`, `query_api` tools with JSON schemas. Build the agent loop: LLM → detect tool_calls → execute → send result back → repeat. Tier 2 eval runs.
 
-- The Docker Compose environment starts successfully and all containers pass their health checks.
-- The questionnaire file exists at the required path and every field contains a value matching the expected format.
-- The questionnaire answer for "what data source stores logs" is `victorialogs`.
-- The questionnaire answer for the MetricsQL query that returns the HTTP request rate uses `rate()`.
-- The autochecker confirms all questionnaire answers are correct.
+**Commit:** `feat: add tool calling (read_file, list_files, query_api)`
 
----
+### Task 3 — Pass the Benchmark
 
-### Task 2 — Build the Observability CLI
+Iterate until the full eval passes (≥75%). Debug one question at a time: fix prompts, improve tool descriptions, handle edge cases.
 
-**Purpose:**
+**Commit:** `feat: optimize agent to pass evaluation benchmark`
 
-Implement a Python CLI using `rich` that queries VictoriaMetrics and VictoriaLogs and presents results in a readable format, forming the tool layer the agent will use in Task 3.
+## Student workflow
 
-**Summary:**
+```
+1. Write/modify agent code
+2. Test locally: python agent.py '{"question": "..."}'
+3. Examine output — correct?
+   ├── Yes → try another
+   └── No → diagnose:
+       ├── Wrong knowledge → fix system prompt
+       ├── Tool not called → fix tool description
+       ├── Tool error → fix tool implementation
+       └── Wrong reasoning → improve prompts
+4. Push code, run autochecker
+5. See eval results (green/red)
+6. Pick one failed question → go to 1
+```
 
-Building on the API knowledge from Task 1, students implement a Python CLI with two subcommands: `metrics` (queries VictoriaMetrics via its HTTP query API and renders results as a `rich` table) and `logs` (queries VictoriaLogs via its HTTP query API and streams results as a `rich` live log panel). The CLI accepts arguments for the query string and a time range.
+## Open questions
 
-Students write unit tests for the query-building and response-parsing logic using `pytest`. The seed project provides the project scaffold and a working `rich` table example as a reference; students implement the two query functions and their CLI wrappers by following the reference pattern.
-
-**Acceptance criteria:**
-
-- `uv run poe cli metrics --query 'rate(http_requests_total[1m])'` prints a `rich` table with at least one row.
-- `uv run poe cli logs --query '{service="api"}' --limit 20` prints at least one log line in a `rich` panel.
-- All unit tests pass (`uv run poe test`).
-- A PR with the implementation is approved and merged.
-
----
-
-### Task 3 — Implement the Agentic Loop
-
-**Purpose:**
-
-Build the simplest possible agentic loop — an LLM that calls the observability tools from Task 2 iteratively until it can produce a diagnosis — and observe how tool availability and context accumulation drive autonomous reasoning.
-
-**Summary:**
-
-Students extend the CLI with an `investigate` subcommand. The command implements a minimal agentic loop: (1) send the user's question and a tool schema to the LLM; (2) if the LLM returns a tool call, execute the matching Python function and append the result to the message history; (3) repeat until the LLM returns a text response with no tool calls; (4) display the final diagnosis using `rich`. The available tools are the metric and log query functions from Task 2. The seed project provides the message-history accumulation skeleton with `# UNCOMMENT AND FILL IN` placeholders; students implement the tool-dispatch loop and the tool schema definitions.
-
-A Docker Compose service runs a simulated anomaly (a spike in HTTP 500 errors) that the agent must identify. Students observe the full loop in action, note how many iterations the agent takes, and record the finding in a comment on their issue. As a final step, students disable one of the two tools and re-run the agent to observe how the narrower tool set produces a less complete diagnosis — making visible that an agent's debugging ability is defined by the tools it can access.
-
-**Acceptance criteria:**
-
-- `uv run poe cli investigate "Is the API healthy?"` completes without error and prints a `rich` diagnosis panel.
-- The agent executes at least two tool calls before producing its final answer (visible in the loop debug output).
-- The agent correctly identifies the simulated anomaly (elevated HTTP 500 rate) in its diagnosis text.
-- A PR with the implementation is approved and merged.
-- The issue contains a comment with the agent's diagnosis from the full-tool run and the single-tool run, each pasted as a code block.
-
----
-
-## Optional task
-
-### Task 1 — Add a Traces Tool Using the Tempo API
-
-**Purpose:**
-
-Extend the agent with a third observability pillar — distributed traces — and observe how richer tool coverage changes the quality of the agent's diagnosis.
-
-**Summary:**
-
-Students add a third tool, `get_traces`, that queries a Grafana Tempo instance (added to the Docker Compose file) for recent trace summaries for a given service and time window. They register the tool in the agent's tool schema alongside the metrics and logs tools.
-
-The simulated anomaly is updated to also produce a slow trace (high latency on a specific span) that only the trace tool can reveal. Students run the agent again and compare the diagnosis with and without the traces tool, recording the difference in a structured comparison file that the autochecker verifies. The Docker Compose update and the tool implementation must each be a separate commit.
-
-**Acceptance criteria:**
-
-- A Tempo service is added to `docker-compose.yml` and starts successfully.
-- `uv run poe cli investigate "What is causing slow responses in the API?"` uses the `get_traces` tool at least once.
-- The agent's diagnosis mentions span latency or a specific slow operation visible only in traces.
-- The comparison file exists at the required path with answers for both the "without traces" and "with traces" scenarios.
-- The Docker Compose change and the tool implementation are separate commits.
+1. Should we provide a starter `agent.py` skeleton? Leaning yes — minimal argparse + main, not the LLM call.
+2. Should we share ~5 sample questions for local testing? Leaning yes — tier 1 only.
+3. Maximum agent loop iterations? Leaning 10 tool calls per question.
+4. Does the agent code live in the project root or a subdirectory? Leaning root.
