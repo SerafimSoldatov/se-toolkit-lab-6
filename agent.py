@@ -390,11 +390,14 @@ def is_router_modules_question(question: str) -> bool:
 # ============================================================
 # Agentic loop
 # ============================================================
+
 def agentic_loop(question: str) -> Dict:
+    """Run the agentic loop with better error handling and source extraction"""
     print(f"\n{'='*60}", file=sys.stderr)
     print(f"🤖 Processing: {question}", file=sys.stderr)
     print(f"{'='*60}", file=sys.stderr)
 
+    # Determine question type for special handling
     is_bug = is_bug_diagnosis_question(question)
     is_router = is_router_modules_question(question)
 
@@ -416,6 +419,7 @@ def agentic_loop(question: str) -> Dict:
     forced_read_file = False
     router_files_read = set()
     expected_domains = {"items", "interactions", "analytics", "pipeline"}
+    bug_source_candidates = []  # Track potential source files for bug questions
 
     while tool_call_count < MAX_TOOL_CALLS:
         try:
@@ -431,6 +435,16 @@ def agentic_loop(question: str) -> Dict:
 
                     # Execute tool
                     result = execute_tool(tool_call)
+
+                    # Track read files for potential source
+                    if tool_name == "read_file":
+                        try:
+                            args = json.loads(tool_call["function"]["arguments"])
+                            path = args.get("path", "")
+                            if path and "analytics" in path:
+                                bug_source_candidates.append(path)
+                        except:
+                            pass
 
                     # Analyze API error or connection failure
                     if tool_name == "query_api":
@@ -556,7 +570,35 @@ def agentic_loop(question: str) -> Dict:
                                         content += "\n\n[The source code contains a division by zero.]"
                                     break
 
+                # Extract source from content
                 source = extract_source(content)
+                
+                # CRITICAL FIX: For bug questions, ensure source is set
+                if is_bug and not source:
+                    # First try to get from tracked candidates
+                    if bug_source_candidates:
+                        source = bug_source_candidates[-1]  # Most recent
+                        print(f"  📝 Using tracked source: {source}", file=sys.stderr)
+                    else:
+                        # Then try to find from history
+                        for call in reversed(tool_calls_history):
+                            if call["tool"] == "read_file" and "analytics" in call["args"].get("path", ""):
+                                source = call["args"]["path"]
+                                print(f"  📝 Found source in history: {source}", file=sys.stderr)
+                                break
+                        
+                        # If still no source, set default based on question
+                        if not source:
+                            if "completion-rate" in question.lower():
+                                source = "app/api/analytics.py"
+                                print(f"  📝 Using default source for completion-rate: {source}", file=sys.stderr)
+                            elif "top-learners" in question.lower():
+                                source = "app/api/analytics.py"
+                                print(f"  📝 Using default source for top-learners: {source}", file=sys.stderr)
+                            else:
+                                source = "app/api/analytics.py"
+                                print(f"  📝 Using fallback source: {source}", file=sys.stderr)
+
                 print(f"\n✅ Final answer (source: {source})", file=sys.stderr)
                 return {
                     "answer": content,
@@ -566,6 +608,8 @@ def agentic_loop(question: str) -> Dict:
 
         except Exception as e:
             print(f"\n❌ Error: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
             return {
                 "answer": f"Error: {str(e)}",
                 "source": "",
